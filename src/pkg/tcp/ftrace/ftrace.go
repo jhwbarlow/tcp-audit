@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -78,13 +79,13 @@ func (e *Eventer) Close() error {
 }
 
 func toEvent(str []byte) (*tcp.Event, error) {
-	command, err := nextField(&str, dashBytes)
+	command, err := nextField(&str, dashBytes, true)
 	if err != nil {
 		return nil, fmt.Errorf("parsing command from event: %w", err)
 	}
 	println("Command:", command)
 
-	pidStr, err := nextField(&str, spaceBytes)
+	pidStr, err := nextField(&str, spaceBytes, true)
 	if err != nil {
 		return nil, fmt.Errorf("parsing PID from event: %w", err)
 	}
@@ -195,10 +196,20 @@ func toEvent(str []byte) (*tcp.Event, error) {
 	}, nil
 }
 
-func nextField(str *[]byte, sep []byte) (field string, err error) {
-	defer panicToErr(&err)
+func nextField(str *[]byte, sep []byte, expectMoreFields bool) (field string, err error) {
+	defer panicToErr(&err) // Catch any unexpected slicing errors without panicking
 
 	idx := bytes.Index(*str, sep)
+	if idx == -1 {
+		if expectMoreFields {
+			return "", io.ErrUnexpectedEOF
+		}
+
+		// If the next seperator is not found, assume that the next token is the last in the str
+		field = string((*str)[:len(*str)])
+		return field, io.EOF
+	}
+
 	field = string((*str)[:idx])
 	*str = (*str)[idx+1:]
 
@@ -206,7 +217,7 @@ func nextField(str *[]byte, sep []byte) (field string, err error) {
 }
 
 func skipField(str *[]byte, sep []byte) (err error) {
-	defer panicToErr(&err)
+	defer panicToErr(&err) // Catch any unexpected slicing errors without panicking
 
 	idx := bytes.Index(*str, sep)
 	*str = (*str)[idx+1:]
@@ -214,12 +225,35 @@ func skipField(str *[]byte, sep []byte) (err error) {
 	return nil
 }
 
+func getTaggedFields(str *[]byte) (map[string]string, error) {
+	fields := make(map[string]string, 20)
+	for {
+		nextTag, err := nextField(str, equalsBytes, true) // Expect at least a value after the tag
+		if err != nil {
+			return nil, fmt.Errorf("parsing next tag: %w", err)
+		}
+
+		nextValue, err := nextField(str, spaceBytes, false) // We cannot expect any more fields as this may be the last
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("parsing next tagged value: %w", err)
+		}
+
+		fields[nextTag] = nextValue
+
+		if err == io.EOF { // No more fields in stream
+			break
+		}
+	}
+
+	return fields, nil
+}
+
 func nextTaggedField(str *[]byte) (field string, err error) {
 	if err := skipField(str, equalsBytes); err != nil {
 		return "", fmt.Errorf("skipping tag: %w", err)
 	}
 
-	field, err = nextField(str, spaceBytes)
+	field, err = nextField(str, spaceBytes, true)
 	if err != nil {
 		return "", fmt.Errorf("parsing tagged field: %w", err)
 	}
