@@ -9,13 +9,14 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/jhwbarlow/tcp-audit/pkg/tcp"
 )
 
 var (
 	dashBytes       = []byte{'-'}
-	colonBytes      = []byte{':'}
+	colonSpaceBytes = []byte(": ")
 	spaceBytes      = []byte{' '}
 	equalsBytes     = []byte{'='}
 	underscoreBytes = []byte{'_'}
@@ -95,94 +96,108 @@ func toEvent(str []byte) (*tcp.Event, error) {
 	}
 	println("PID:", pid)
 
-	if err := skipField(&str, colonBytes); err != nil {
+	if err := skipField(&str, colonSpaceBytes); err != nil {
 		return nil, fmt.Errorf("skipping metadata from event: %w", err)
 	}
 
-	if err := skipField(&str, colonBytes); err != nil {
+	if err := skipField(&str, colonSpaceBytes); err != nil {
 		return nil, fmt.Errorf("skipping tracepoint from event: %w", err)
 	}
 
-	family, err := nextTaggedField(&str)
+	println(string(str))
+
+	// Begin tagged data
+	tags, err := getTaggedFields(&str)
+	for k, v := range tags {
+		println(k, v)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("parsing family from event: %w", err)
+		return nil, fmt.Errorf("parsing tagged fields: %w", err)
+	}
+
+	family, ok := tags["family"]
+	if !ok {
+		return nil, errors.New("family not present in event")
 	}
 	println("Family:", family)
 
-	protocol, err := nextTaggedField(&str)
-	if err != nil {
-		return nil, fmt.Errorf("parsing protocol from event: %w", err)
+	protocol, ok := tags["protocol"]
+	if !ok {
+		return nil, errors.New("protocol not present in event")
 	}
 	println("Protocol:", protocol)
 
-	sPort, err := nextTaggedField(&str)
-	if err != nil {
-		return nil, fmt.Errorf("parsing source port from event: %w", err)
+	sPort, ok := tags["sport"]
+	if !ok {
+		return nil, errors.New("source port not present in event")
 	}
 	sourcePort, err := strconv.ParseUint(sPort, 10, 16)
 	if err != nil {
 		return nil, fmt.Errorf("converting source port to integer: %w", err)
 	}
-	println("Source Port:", sPort)
+	println("Source Port:", sourcePort)
 
-	equalsIdx := bytes.Index(str, equalsBytes)
-	str = str[equalsIdx+1:]
-	spaceIdx := bytes.Index(str, spaceBytes)
-	dPort := string(str[:spaceIdx])
-	println("Dest Port:", dPort)
+	dPort, ok := tags["dport"]
+	if !ok {
+		return nil, errors.New("destination port not present in event")
+	}
 	destPort, err := strconv.ParseUint(dPort, 10, 16)
 	if err != nil {
 		return nil, fmt.Errorf("converting destination port to integer: %w", err)
 	}
-	str = str[spaceIdx+1:]
+	println("Dest Port:", dPort)
 
-	equalsIdx = bytes.Index(str, equalsBytes)
-	str = str[equalsIdx+1:]
-	spaceIdx = bytes.Index(str, spaceBytes)
-	sAddr := string(str[:spaceIdx])
-	println("Source Addr:", sAddr)
+	sAddr, ok := tags["saddr"]
+	if !ok {
+		return nil, errors.New("source address not present in event")
+	}
 	sourceIP := net.ParseIP(sAddr)
 	if sourceIP == nil {
 		return nil, errors.New("could not parse source IP address")
 	}
-	str = str[spaceIdx+1:]
+	println("Source Addr:", sAddr)
 
-	equalsIdx = bytes.Index(str, equalsBytes)
-	str = str[equalsIdx+1:]
-	spaceIdx = bytes.Index(str, spaceBytes)
-	dAddr := string(str[:spaceIdx])
-	println("Dest Addr:", dAddr)
+	dAddr, ok := tags["daddr"]
+	if !ok {
+		return nil, errors.New("destination address not present in event")
+	}
 	destIP := net.ParseIP(dAddr)
 	if destIP == nil {
 		return nil, errors.New("could not parse destination IP address")
 	}
-	str = str[spaceIdx+1:]
+	println("Dest Addr:", dAddr)
 
-	equalsIdx = bytes.Index(str, equalsBytes)
-	str = str[equalsIdx+1:]
-	spaceIdx = bytes.Index(str, spaceBytes)
-	sAddrV6 := string(str[:spaceIdx])
+	sAddrV6, ok := tags["saddrv6"]
+	if !ok {
+		return nil, errors.New("source IPv6 address not present in event")
+	}
 	println("Source Addr IPv6:", sAddrV6)
-	str = str[spaceIdx+1:]
 
-	equalsIdx = bytes.Index(str, equalsBytes)
-	str = str[equalsIdx+1:]
-	spaceIdx = bytes.Index(str, spaceBytes)
-	dAddrV6 := string(str[:spaceIdx])
+	dAddrV6, ok := tags["daddrv6"]
+	if !ok {
+		return nil, errors.New("destination IPv6 address not present in event")
+	}
 	println("Dest Addr IPv6:", dAddrV6)
-	str = str[spaceIdx+1:]
 
-	underscoreIdx := bytes.Index(str, underscoreBytes)
-	str = str[underscoreIdx+1:]
-	spaceIdx = bytes.Index(str, spaceBytes)
-	oldState := string(str[:spaceIdx])
-	println("Old State:", oldState)
-	str = str[spaceIdx+1:]
+	oldState, ok := tags["oldstate"]
+	if !ok {
+		return nil, errors.New("old state not present in event")
+	}
+	canonicalOldState, err := canonicaliseState(oldState)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalising old state: %w", err)
+	}
+	println("Old State:", canonicalOldState)
 
-	underscoreIdx = bytes.Index(str, underscoreBytes)
-	str = str[underscoreIdx+1:]
-	newState := string(str)
-	println("New State:", newState)
+	newState, ok := tags["newstate"]
+	if !ok {
+		return nil, errors.New("new state not present in event")
+	}
+	canonicalNewState, err := canonicaliseState(newState)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalising new state: %w", err)
+	}
+	println("New State:", canonicalNewState)
 
 	return &tcp.Event{
 		CommandOnCPU: command,
@@ -220,7 +235,7 @@ func skipField(str *[]byte, sep []byte) (err error) {
 	defer panicToErr(&err) // Catch any unexpected slicing errors without panicking
 
 	idx := bytes.Index(*str, sep)
-	*str = (*str)[idx+1:]
+	*str = (*str)[idx+len(sep):] // Skip over the seperator bytes ready for the next read from str
 
 	return nil
 }
@@ -248,19 +263,6 @@ func getTaggedFields(str *[]byte) (map[string]string, error) {
 	return fields, nil
 }
 
-func nextTaggedField(str *[]byte) (field string, err error) {
-	if err := skipField(str, equalsBytes); err != nil {
-		return "", fmt.Errorf("skipping tag: %w", err)
-	}
-
-	field, err = nextField(str, spaceBytes, true)
-	if err != nil {
-		return "", fmt.Errorf("parsing tagged field: %w", err)
-	}
-
-	return field, nil
-}
-
 func panicToErr(err *error) {
 	panicData := recover()
 	if panicData != nil {
@@ -270,4 +272,10 @@ func panicToErr(err *error) {
 			*err = fmt.Errorf("parsing next field: %v", panicData)
 		}
 	}
+}
+
+func canonicaliseState(state string) (tcp.State, error) {
+	state = strings.TrimPrefix(state, "TCP_")
+	state = strings.ReplaceAll(state, "_", "-")
+	return tcp.StateFromString(state)
 }
