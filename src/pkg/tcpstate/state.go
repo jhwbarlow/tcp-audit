@@ -1,8 +1,7 @@
-package tcp
+package tcpstate
 
 import (
 	"fmt"
-	"net"
 )
 
 type State string
@@ -21,7 +20,7 @@ const (
 	StateClosed      State = "CLOSED"
 )
 
-func StateFromString(state string) (State, error) {
+func FromString(state string) (State, error) {
 	switch state {
 	case string(StateListen):
 		return StateListen, nil
@@ -50,14 +49,6 @@ func StateFromString(state string) (State, error) {
 	}
 }
 
-type Event struct {
-	PIDOnCPU             int
-	CommandOnCPU         string
-	SourceIP, DestIP     net.IP
-	SourcePort, DestPort uint16
-	OldState, NewState   State
-}
-
-type Eventer interface {
-	Event() (*Event, error)
+func (s State) String() string {
+	return string(s)
 }
