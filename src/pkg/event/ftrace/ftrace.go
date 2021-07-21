@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
+	"log"
 	"net"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/jhwbarlow/tcp-audit/pkg/event"
@@ -35,6 +38,9 @@ type Eventer struct {
 	tracePipe *os.File
 	scanner   *bufio.Scanner
 	instance  string
+
+	closedMutex *sync.Mutex
+	closed      bool
 }
 
 func New() (e *Eventer, err error) {
@@ -74,7 +80,7 @@ func New() (e *Eventer, err error) {
 	}
 
 	// Open the pipe for reading
-	tracePipe, cleanupOpenTracePipeFunc, err := openTracePipe(instance, tracepoint)
+	tracePipe, cleanupOpenTracePipeFunc, err := openTracePipe(instance)
 	if err != nil {
 		return nil, fmt.Errorf("opening event trace pipe: %w", err)
 	}
@@ -87,18 +93,32 @@ func New() (e *Eventer, err error) {
 	}()
 
 	return &Eventer{
-		instance:  instance,
-		tracePipe: tracePipe,
-		scanner:   bufio.NewScanner(tracePipe),
+		instance:    instance,
+		tracePipe:   tracePipe,
+		scanner:     bufio.NewScanner(tracePipe),
+		closedMutex: new(sync.Mutex),
+		closed:      false,
 	}, nil
 }
 
 func (e *Eventer) Event() (*event.Event, error) {
+	e.closedMutex.Lock()
+	if e.closed {
+		return nil, errors.New("attempted read from closed eventer")
+	}
+	e.closedMutex.Unlock()
+
 	var event *event.Event
 	var err error
 	for {
 		if !e.scanner.Scan() {
 			if err = e.scanner.Err(); err != nil {
+				e.closedMutex.Lock()
+				if e.closed {
+					return nil, errors.New("attempted read from closed eventer")
+				}
+				e.closedMutex.Unlock()
+
 				return nil, fmt.Errorf("scanning trace pipe for event: %w", err)
 			}
 
@@ -126,8 +146,13 @@ func (e *Eventer) Event() (*event.Event, error) {
 }
 
 func (e *Eventer) Close() error {
-	var err error
+	e.closedMutex.Lock()
+	// Setting this flag will cause Event() to no longer attempt to read from
+	// the trace buffer
+	e.closed = true
+	e.closedMutex.Unlock()
 
+	var err error
 	if closeErr := closeTracePipe(e.tracePipe); closeErr != nil {
 		err = fmt.Errorf("closing event trace pipe: %w", closeErr)
 	}
@@ -140,10 +165,20 @@ func (e *Eventer) Close() error {
 }
 
 func getTraceFSMountpoint() (string, error) {
+	// It has been observed that tracefs only seems to get mounted by the kernel
+	// when the path is first accessed, so poke some likely paths to get it mounted
+	dir, err := os.Open("/sys/kernel/debug/tracing")
+	dir.Close()
+	if err != nil && os.IsNotExist(err) {
+		dir, _ := os.Open("/sys/kernel/tracing")
+		dir.Close()
+	}
+
 	mounts, err := os.Open("/proc/mounts")
 	if err != nil {
 		return "", fmt.Errorf("opening mounts: %w", err)
 	}
+	defer mounts.Close()
 
 	scanner := bufio.NewScanner(mounts)
 	for {
@@ -200,7 +235,7 @@ func getTracePoint(mountpoint string) (string, error) {
 
 func createTracingInstance(mountpoint string) (string, func(), error) {
 	uid := uuid.NewString()
-	instance := mountpoint + "instances/tcp-audit-" + uid
+	instance := mountpoint + "/instances/tcp-audit-" + uid
 	if err := os.Mkdir(instance, 0600); err != nil {
 		return "", nil, fmt.Errorf("making instance directory: %w", err)
 	}
@@ -214,12 +249,7 @@ func createTracingInstance(mountpoint string) (string, func(), error) {
 }
 
 func enableTracing(instance string) error {
-	tracingOnFile, err := os.Open(instance + "/tracing_on")
-	if err != nil {
-		return fmt.Errorf("opening tracing_on file: %w", err)
-	}
-	defer tracingOnFile.Close()
-	if _, err := tracingOnFile.WriteString("1"); err != nil {
+	if err := ioutil.WriteFile(instance+"/tracing_on", []byte("1\n"), 0); err != nil {
 		return fmt.Errorf("turning tracing on: %w", err)
 	}
 
@@ -227,20 +257,16 @@ func enableTracing(instance string) error {
 }
 
 func enableTracePoint(instance, tracepoint string) error {
-	tracepointFile, err := os.Open(instance + "/events/" + tracepoint + "/enable")
-	if err != nil {
-		return fmt.Errorf("opening tracepoint enable file: %w", err)
-	}
-	defer tracepointFile.Close()
-	if _, err := tracepointFile.WriteString("1"); err != nil {
+	if err := ioutil.WriteFile(instance+"/events/"+tracepoint+"/enable",
+		[]byte("1\n"), 0); err != nil {
 		return fmt.Errorf("enabling tracepoint: %w", err)
 	}
 
 	return nil
 }
 
-func openTracePipe(instance, tracepoint string) (*os.File, func(), error) {
-	tracePipe, err := os.Open(instance + "/events/" + tracepoint + "/trace_pipe")
+func openTracePipe(instance string) (*os.File, func(), error) {
+	tracePipe, err := os.Open(instance + "/trace_pipe")
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening trace_pipe: %w", err)
 	}
@@ -258,7 +284,6 @@ func toEvent(str []byte) (*event.Event, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing command from event: %w", err)
 	}
-	println("Command:", command)
 
 	pidStr, err := nextField(&str, spaceBytes, true)
 	if err != nil {
@@ -268,7 +293,6 @@ func toEvent(str []byte) (*event.Event, error) {
 	if err != nil {
 		return nil, fmt.Errorf("converting PID to integer: %w", err)
 	}
-	println("PID:", pid)
 
 	if err := skipField(&str, colonSpaceBytes); err != nil {
 		return nil, fmt.Errorf("skipping metadata from event: %w", err)
@@ -278,20 +302,14 @@ func toEvent(str []byte) (*event.Event, error) {
 		return nil, fmt.Errorf("skipping tracepoint from event: %w", err)
 	}
 
-	println(string(str))
-
 	// Begin tagged data
 	tags, err := getTaggedFields(&str)
-	for k, v := range tags {
-		println(k, v)
-	}
 	if err != nil {
 		return nil, fmt.Errorf("parsing tagged fields: %w", err)
 	}
 
 	family, ok := tags["family"]
 	if ok { // Family will not be present if using tcp_set_state
-		println("Family:", family)
 		if family != familyInet {
 			return nil, errIrrelevantEvent
 		}
@@ -299,7 +317,6 @@ func toEvent(str []byte) (*event.Event, error) {
 
 	protocol, ok := tags["protocol"]
 	if ok { // Protocol will not be present if using tcp_set_state
-		println("Protocol:", protocol)
 		if protocol != protocolTCP {
 			return nil, errIrrelevantEvent
 		}
@@ -313,7 +330,6 @@ func toEvent(str []byte) (*event.Event, error) {
 	if err != nil {
 		return nil, fmt.Errorf("converting source port to integer: %w", err)
 	}
-	println("Source Port:", sourcePort)
 
 	dPort, ok := tags["dport"]
 	if !ok {
@@ -323,7 +339,6 @@ func toEvent(str []byte) (*event.Event, error) {
 	if err != nil {
 		return nil, fmt.Errorf("converting destination port to integer: %w", err)
 	}
-	println("Dest Port:", dPort)
 
 	sAddr, ok := tags["saddr"]
 	if !ok {
@@ -333,7 +348,6 @@ func toEvent(str []byte) (*event.Event, error) {
 	if sourceIP == nil {
 		return nil, errors.New("could not parse source IP address")
 	}
-	println("Source Addr:", sAddr)
 
 	dAddr, ok := tags["daddr"]
 	if !ok {
@@ -343,19 +357,16 @@ func toEvent(str []byte) (*event.Event, error) {
 	if destIP == nil {
 		return nil, errors.New("could not parse destination IP address")
 	}
-	println("Dest Addr:", dAddr)
 
-	sAddrV6, ok := tags["saddrv6"]
-	if !ok {
-		return nil, errors.New("source IPv6 address not present in event")
-	}
-	println("Source Addr IPv6:", sAddrV6)
+	/* 	sAddrV6, ok := tags["saddrv6"]
+	   	if !ok {
+	   		return nil, errors.New("source IPv6 address not present in event")
+	   	}
 
-	dAddrV6, ok := tags["daddrv6"]
-	if !ok {
-		return nil, errors.New("destination IPv6 address not present in event")
-	}
-	println("Dest Addr IPv6:", dAddrV6)
+	   	dAddrV6, ok := tags["daddrv6"]
+	   	if !ok {
+	   		return nil, errors.New("destination IPv6 address not present in event")
+	   	} */
 
 	oldState, ok := tags["oldstate"]
 	if !ok {
@@ -365,7 +376,6 @@ func toEvent(str []byte) (*event.Event, error) {
 	if err != nil {
 		return nil, fmt.Errorf("canonicalising old state: %w", err)
 	}
-	println("Old State:", canonicalOldState)
 
 	newState, ok := tags["newstate"]
 	if !ok {
@@ -375,7 +385,6 @@ func toEvent(str []byte) (*event.Event, error) {
 	if err != nil {
 		return nil, fmt.Errorf("canonicalising new state: %w", err)
 	}
-	println("New State:", canonicalNewState)
 
 	return &event.Event{
 		CommandOnCPU: command,
@@ -384,8 +393,8 @@ func toEvent(str []byte) (*event.Event, error) {
 		DestIP:       destIP,
 		SourcePort:   uint16(sourcePort),
 		DestPort:     uint16(destPort),
-		OldState:     tcpstate.State(oldState),
-		NewState:     tcpstate.State(newState),
+		OldState:     canonicalOldState,
+		NewState:     canonicalNewState,
 	}, nil
 }
 
@@ -453,12 +462,23 @@ func panicToErr(err *error) {
 }
 
 func canonicaliseState(state string) (tcpstate.State, error) {
-	state = strings.TrimPrefix(state, "TCP_")
-	state = strings.ReplaceAll(state, "_", "-")
+	switch state {
+	case "TCP_CLOSE":
+		state = "CLOSED"
+	case "TCP_FIN_WAIT1":
+		state = "FIN-WAIT-1"
+	case "TCP_FIN_WAIT2":
+		state = "FIN-WAIT-2"
+	default:
+		state = strings.TrimPrefix(state, "TCP_")
+		state = strings.ReplaceAll(state, "_", "-")
+	}
+
 	return tcpstate.FromString(state)
 }
 
 func cleanupInstance(instance string) error {
+	log.Printf("Removing tracing instance: %s", instance)
 	if err := os.Remove(instance); err != nil {
 		return fmt.Errorf("removing tracing instance: %w", err)
 	}
@@ -467,6 +487,7 @@ func cleanupInstance(instance string) error {
 }
 
 func closeTracePipe(pipe *os.File) error {
+	log.Printf("Closing trace pipe: %s", pipe.Name())
 	if err := pipe.Close(); err != nil {
 		return fmt.Errorf("closing trace pipe: %w", err)
 	}
