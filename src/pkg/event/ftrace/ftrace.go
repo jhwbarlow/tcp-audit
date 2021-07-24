@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jhwbarlow/tcp-audit/pkg/event"
@@ -280,7 +281,9 @@ func openTracePipe(instance string) (*os.File, func(), error) {
 }
 
 func toEvent(str []byte) (*event.Event, error) {
-	command, err := nextField(&str, dashBytes, true)
+	time := time.Now().UTC()
+
+	command, err := parseCommand(&str)
 	if err != nil {
 		return nil, fmt.Errorf("parsing command from event: %w", err)
 	}
@@ -387,6 +390,7 @@ func toEvent(str []byte) (*event.Event, error) {
 	}
 
 	return &event.Event{
+		Time:         time,
 		CommandOnCPU: command,
 		PIDOnCPU:     int(pid),
 		SourceIP:     sourceIP,
@@ -396,6 +400,25 @@ func toEvent(str []byte) (*event.Event, error) {
 		OldState:     canonicalOldState,
 		NewState:     canonicalNewState,
 	}, nil
+}
+
+func parseCommand(str *[]byte) (command string, err error) {
+	defer panicToErr(&err) // Catch any unexpected slicing errors without panicking
+
+	// Get index of colon, then work backwards to the last dash.
+	// This is needed as the command is delimited by a dash, but may contain a dash itself!
+	idx := bytes.Index(*str, colonSpaceBytes) - 1
+	for ; (*str)[idx] != byte('-'); idx-- {
+	}
+	cmd := (*str)[:idx]
+	*str = (*str)[idx+1:]
+
+	// Strip leading padding spaces
+	for idx = 0; cmd[idx] == byte(' '); idx++ {
+	}
+	command = string(cmd[idx:])
+
+	return command, nil
 }
 
 func nextField(str *[]byte, sep []byte, expectMoreFields bool) (field string, err error) {
@@ -469,6 +492,8 @@ func canonicaliseState(state string) (tcpstate.State, error) {
 		state = "FIN-WAIT-1"
 	case "TCP_FIN_WAIT2":
 		state = "FIN-WAIT-2"
+	case "TCP_SYN_RECV":
+		state = "SYN-RECEIVED"
 	default:
 		state = strings.TrimPrefix(state, "TCP_")
 		state = strings.ReplaceAll(state, "_", "-")

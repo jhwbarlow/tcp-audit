@@ -3,6 +3,7 @@ package event
 import (
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/jhwbarlow/tcp-audit/pkg/tcpstate"
 )
@@ -17,6 +18,7 @@ type EventerCloser interface {
 }
 
 type Event struct {
+	Time                 time.Time
 	PIDOnCPU             int
 	CommandOnCPU         string
 	SourceIP, DestIP     net.IP
