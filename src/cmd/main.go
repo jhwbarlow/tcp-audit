@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -8,23 +10,37 @@ import (
 	"syscall"
 
 	"github.com/jhwbarlow/tcp-audit/pkg/event"
-	"github.com/jhwbarlow/tcp-audit/pkg/event/ftrace"
+	"github.com/jhwbarlow/tcp-audit/pkg/pluginload"
 	"github.com/jhwbarlow/tcp-audit/pkg/sink"
-	"github.com/jhwbarlow/tcp-audit/pkg/sink/pgsql"
 	"golang.org/x/sys/unix"
 )
 
-const maxErrors = 5
+const (
+	eventerFlagStr = "event"
+	sinkerFlagStr  = "sink"
+
+	maxErrors = 5
+)
+
+var (
+	eventerFlag = flag.String(eventerFlagStr, "", "path to eventer plugin")
+	sinkerFlag  = flag.String(sinkerFlagStr, "", "path to sinker plugin")
+)
 
 func main() {
+	flag.Parse()
+	if err := checkFlags(); err != nil {
+		log.Fatalf("Error: command-line flags: %v", err)
+	}
+
 	signalChan := installSignalHandler()
 
-	eventer, err := ftrace.New()
+	eventer, err := loadEventer(*eventerFlag)
 	if err != nil {
 		log.Fatalf("Error: initialising eventer: %v", err)
 	}
 
-	sinker, err := pgsql.New()
+	sinker, err := loadSinker(*sinkerFlag)
 	if err != nil {
 		log.Printf("Error: initialising sinker: %v", err)
 		cleanupEventer(eventer)
@@ -72,6 +88,18 @@ func main() {
 	}
 }
 
+func checkFlags() error {
+	if *sinkerFlag == "" {
+		return errors.New(sinkerFlagStr + " not supplied")
+	}
+
+	if *eventerFlag == "" {
+		return errors.New(eventerFlagStr + " not supplied")
+	}
+
+	return nil
+}
+
 func installSignalHandler() <-chan os.Signal {
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, os.Interrupt, unix.SIGTERM)
@@ -104,6 +132,18 @@ func handleSignal(eventer event.Eventer, sinker sink.Sinker, signal os.Signal) {
 	}
 	cleanupAll(eventer, sinker)
 	os.Exit(exitCode)
+}
+
+func loadSinker(path string) (sink.Sinker, error) {
+	pluginLoader := pluginload.NewFilesystemSharedObjectPluginLoader(path)
+	loader := sink.NewPluginSinkerLoader(pluginLoader)
+	return loader.Load()
+}
+
+func loadEventer(path string) (event.Eventer, error) {
+	pluginLoader := pluginload.NewFilesystemSharedObjectPluginLoader(path)
+	loader := event.NewPluginEventerLoader(pluginLoader)
+	return loader.Load()
 }
 
 func cleanupEventer(eventer event.Eventer) {
