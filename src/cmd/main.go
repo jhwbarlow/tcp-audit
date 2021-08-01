@@ -5,10 +5,11 @@ import (
 	"flag"
 	"log"
 	"os"
-	"os/signal"
+	"syscall"
 
 	"github.com/jhwbarlow/tcp-audit/pkg/event"
 	"github.com/jhwbarlow/tcp-audit/pkg/pluginload"
+	"github.com/jhwbarlow/tcp-audit/pkg/signalhandler"
 	"github.com/jhwbarlow/tcp-audit/pkg/sink"
 	"golang.org/x/sys/unix"
 )
@@ -31,23 +32,42 @@ func main() {
 		log.Fatalf("Error: command-line flags: %v", err)
 	}
 
-	signalChan := installSignalHandler()
-	done := make(chan struct{})
-	cleaner := new(cleaner)
+	runner := newEventPipingRunner()
+	signalHandler := signalhandler.NewUnixSignalHandler()
 
-	eventer, err := loadEventer(*eventerFlag)
+	run(*eventerFlag, *sinkerFlag, signalHandler, runner)
+}
+
+func run(eventerPath string,
+	sinkerPath string,
+	signalHandler signalhandler.SignalHandler,
+	runner eventPipingRunner) {
+	signalChan, done := signalHandler.Install(os.Interrupt, unix.SIGTERM)
+	cleaner := new(closingCleaner)
+
+	eventer, err := loadEventer(eventerPath)
 	if err != nil {
 		log.Fatalf("Error: initialising eventer: %v", err)
 	}
 
-	sinker, err := loadSinker(*sinkerFlag)
+	sinker, err := loadSinker(sinkerPath)
 	if err != nil {
 		log.Printf("Error: initialising sinker: %v", err)
 		cleaner.cleanupEventer(eventer)
 		os.Exit(1)
 	}
 
-	newRunner(eventer, sinker, cleaner, done, signalChan).run() //TODO: Deal with any errors
+	if err := newEventPipingRunner(eventer, sinker, done, maxErrors).run(); err != nil {
+		log.Printf("Error: runner: %v", err)
+		cleaner.cleanupAll(eventer, sinker)
+		os.Exit(1)
+	}
+
+	// If we get here, the runner must've stopped due to being asked. This can only happen
+	// from a signal, so retrieve it
+	cleaner.cleanupAll(eventer, sinker)
+	signal := <-signalChan
+	handleSignal(signal)
 }
 
 func checkFlags() error {
@@ -74,8 +94,11 @@ func loadEventer(path string) (event.Eventer, error) {
 	return loader.Load()
 }
 
-func installSignalHandler() <-chan os.Signal {
-	signalChan := make(chan os.Signal, 1)
-	signal.Notify(signalChan, os.Interrupt, unix.SIGTERM)
-	return signalChan
+func handleSignal(signal os.Signal) {
+	exitCode := 0
+	if signal, ok := signal.(syscall.Signal); ok {
+		exitCode = 127 + int(signal)
+	}
+
+	os.Exit(exitCode)
 }

@@ -7,9 +7,15 @@ import (
 	"github.com/jhwbarlow/tcp-audit/pkg/sink"
 )
 
-type cleaner struct{}
+type cleaner interface {
+	cleanupEventer(eventer event.Eventer)
+	cleanupSinker(sinker sink.Sinker)
+	cleanupAll(eventer event.Eventer, sinker sink.Sinker)
+}
 
-func (*cleaner) cleanupEventer(eventer event.Eventer) {
+type closingCleaner struct{}
+
+func (*closingCleaner) cleanupEventer(eventer event.Eventer) {
 	if eventerCloser, ok := eventer.(event.EventerCloser); ok {
 		if closeErr := eventerCloser.Close(); closeErr != nil {
 			log.Printf("Error: closing eventer: %v", closeErr)
@@ -17,7 +23,7 @@ func (*cleaner) cleanupEventer(eventer event.Eventer) {
 	}
 }
 
-func (*cleaner) cleanupSinker(sinker sink.Sinker) {
+func (*closingCleaner) cleanupSinker(sinker sink.Sinker) {
 	if sinkerCloser, ok := sinker.(sink.SinkerCloser); ok {
 		if closeErr := sinkerCloser.Close(); closeErr != nil {
 			log.Printf("Error: closing sinker: %v", closeErr)
@@ -25,7 +31,7 @@ func (*cleaner) cleanupSinker(sinker sink.Sinker) {
 	}
 }
 
-func (c *cleaner) cleanupAll(eventer event.Eventer, sinker sink.Sinker) {
-	c.cleanupEventer(eventer)
-	c.cleanupSinker(sinker)
+func (cc *closingCleaner) cleanupAll(eventer event.Eventer, sinker sink.Sinker) {
+	cc.cleanupEventer(eventer)
+	cc.cleanupSinker(sinker)
 }

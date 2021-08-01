@@ -37,3 +37,15 @@ func (e *Event) String() string {
 		e.OldState,
 		e.NewState)
 }
+
+func (e *Event) Equal(event *Event) bool {
+	return event.Time == e.Time &&
+		event.PIDOnCPU == e.PIDOnCPU &&
+		event.CommandOnCPU == e.CommandOnCPU &&
+		event.SourceIP.Equal(e.SourceIP) &&
+		event.DestIP.Equal(e.DestIP) &&
+		event.SourcePort == e.SourcePort &&
+		event.DestPort == e.DestPort &&
+		event.OldState == e.OldState &&
+		event.NewState == e.NewState
+}
