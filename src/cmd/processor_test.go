@@ -20,7 +20,7 @@ func newMockEventer(eventToReturn *event.Event, errToReturn error, noToReturn in
 	if errToReturn != nil {
 		errChan := make(chan error, noToReturn)
 		for i := 0; i < noToReturn; i++ {
-			errChan <- errToReturn // Buffer up the error so it is read when the runner reads from this eventer
+			errChan <- errToReturn // Buffer up the error so it is read when the processor reads from this eventer
 		}
 
 		return &mockEventer{errChan: errChan}
@@ -28,7 +28,7 @@ func newMockEventer(eventToReturn *event.Event, errToReturn error, noToReturn in
 
 	eventChan := make(chan *event.Event, noToReturn)
 	for i := 0; i < noToReturn; i++ {
-		eventChan <- eventToReturn // Buffer up the event so it is read when the runner reads from this eventer
+		eventChan <- eventToReturn // Buffer up the event so it is read when the processor reads from this eventer
 	}
 
 	return &mockEventer{eventChan: eventChan}
@@ -53,7 +53,7 @@ func newMockSinker(errToReturn error, noErrToReturn int) *mockSinker {
 	if errToReturn != nil {
 		errChan := make(chan error, noErrToReturn)
 		for i := 0; i < noErrToReturn; i++ {
-			errChan <- errToReturn // Buffer up the error so it is read when the runner writes to this sinker
+			errChan <- errToReturn // Buffer up the error so it is read when the processor writes to this sinker
 		}
 
 		return &mockSinker{errChan: errChan}
@@ -72,9 +72,9 @@ func (ms *mockSinker) Sink(event *event.Event) error {
 	return nil
 }
 
-// TestRunnerEvent tests that the runner successfully receives
+// TestProcessorEvent tests that the processor successfully receives
 // an event from the Eventer and sends it to the Sinker
-func TestRunnerEvent(t *testing.T) {
+func TestProcessorEvent(t *testing.T) {
 	mockEvent := &event.Event{
 		Time:         time.Now(),
 		PIDOnCPU:     7337,
@@ -89,20 +89,22 @@ func TestRunnerEvent(t *testing.T) {
 	mockEventer := newMockEventer(mockEvent, nil, 1)
 	mockSinker := newMockSinker(nil, 0)
 	done := make(chan struct{})
-	runner := newEventPipingRunner(mockEventer, mockSinker, done, maxErrors)
-	defer close(done) // Close down the runner
+	processor := newPipingEventProcessor(mockEventer, mockSinker, maxErrors)
+	processor.registerDoneChannel(done)
 
-	// The runner runs in an infinite loop so we must run it in its
+	defer close(done) // Close down the processor
+
+	// The processor runs in an infinite loop so we must run it in its
 	// own goroutine so we dont block forever
 	errChan := make(chan error)
 	go func(errChan chan<- error) {
-		errChan <- runner.run()
+		errChan <- processor.run()
 	}(errChan)
 
-	// Testing the runner is quite difficult as we want to have an eventer
+	// Testing the processor is quite difficult as we want to have an eventer
 	// which emits just one event. This is then sent to the sinker, which then
 	// informs this goroutine that it has done so.
-	// In this way we avoid closing the done channel before the runner has
+	// In this way we avoid closing the done channel before the processor has
 	// processed the event
 	event := <-mockSinker.receivedEventChan // The sinker has received the test event
 	select {
@@ -118,31 +120,32 @@ func TestRunnerEvent(t *testing.T) {
 	t.Logf("received event %q", event)
 }
 
-// TestRunnerEventerError tests that the runner successfully stops
+// TestProcessorEventerError tests that the processor successfully stops
 // and returns an error when the Eventer returns successive errors
-func TestRunnerEventerError(t *testing.T) {
+func TestProcessorEventerError(t *testing.T) {
 	mockError := errors.New("mock event error")
 	mockEventer := newMockEventer(nil, mockError, 3)
 	mockSinker := new(mockSinker)
 	done := make(chan struct{})
-	runner := newEventPipingRunner(mockEventer, mockSinker, done, 3)
+	processor := newPipingEventProcessor(mockEventer, mockSinker, 3)
+	processor.registerDoneChannel(done)
 
-	// The runner runs in an infinite loop so we must run it in its
+	// The processor runs in an infinite loop so we must run it in its
 	// own goroutine if we want to be able to cancel it.
-	// Testing the runner is quite difficult as we want to have an eventer
+	// Testing the processor is quite difficult as we want to have an eventer
 	// which emits several errors. These should then be processed by the
-	// runner, causing it to exit after the error threshold is reached.
-	// The WaitGroup is used to ensure that the runner has exited (and
+	// processor, causing it to exit after the error threshold is reached.
+	// The WaitGroup is used to ensure that the processor has exited (and
 	// therefore all errors have been processed) before checking the errChan.
 	// However, the errChan used to communicate with the main test goroutine
-	// must be buffered, so deadlock does not occur between the runner and the
+	// must be buffered, so deadlock does not occur between the processor and the
 	// test goroutine
 	errChan := make(chan error, 1)
 	waitGroup := new(sync.WaitGroup)
 	waitGroup.Add(1)
 	go func(errChan chan<- error) {
-		err := runner.run()
-		t.Logf("got error %q (of type %T) from runner", err, err)
+		err := processor.run()
+		t.Logf("got error %q (of type %T) from processor", err, err)
 		errChan <- err
 		waitGroup.Done()
 	}(errChan)
@@ -156,13 +159,13 @@ func TestRunnerEventerError(t *testing.T) {
 		}
 	default:
 		t.Error("expected error, got nil")
-		close(done) // Close down the runner as it will not have closed itself
+		close(done) // Close down the processor as it will not have closed itself
 	}
 }
 
-// TestRunnerSinkerError tests that the runner successfully stops
+// TestProcessorSinkerError tests that the processor successfully stops
 // and returns an error when the Eventer returns successive errors
-func TestRunnerSinkerError(t *testing.T) {
+func TestProcessorSinkerError(t *testing.T) {
 	mockEvent := &event.Event{
 		Time:         time.Now(),
 		PIDOnCPU:     7337,
@@ -178,24 +181,25 @@ func TestRunnerSinkerError(t *testing.T) {
 	mockEventer := newMockEventer(mockEvent, nil, 3)
 	mockSinker := newMockSinker(mockError, 3)
 	done := make(chan struct{})
-	runner := newEventPipingRunner(mockEventer, mockSinker, done, 3)
+	processor := newPipingEventProcessor(mockEventer, mockSinker, 3)
+	processor.registerDoneChannel(done)
 
-	// The runner runs in an infinite loop so we must run it in its
+	// The processor runs in an infinite loop so we must run it in its
 	// own goroutine if we want to be able to cancel it.
-	// Testing the runner is quite difficult as we want to have a sinker
+	// Testing the processor is quite difficult as we want to have a sinker
 	// which returns several errors. These should then be processed by the
-	// runner, causing it to exit after the error threshold is reached.
-	// The WaitGroup is used to ensure that the runner has exited (and
+	// processor, causing it to exit after the error threshold is reached.
+	// The WaitGroup is used to ensure that the processor has exited (and
 	// therefore all errors have been processed) before checking the errChan.
 	// However, the errChan used to communicate with the main test goroutine
-	// must be buffered, so deadlock does not occur between the runner and the
+	// must be buffered, so deadlock does not occur between the processor and the
 	// test goroutine
 	errChan := make(chan error, 1)
 	waitGroup := new(sync.WaitGroup)
 	waitGroup.Add(1)
 	go func(errChan chan<- error) {
-		err := runner.run()
-		t.Logf("got error %q (of type %T) from runner", err, err)
+		err := processor.run()
+		t.Logf("got error %q (of type %T) from processor", err, err)
 		errChan <- err
 		waitGroup.Done()
 	}(errChan)
@@ -210,6 +214,6 @@ func TestRunnerSinkerError(t *testing.T) {
 		t.Logf("got error %q (of type %T)", err, err)
 	default:
 		t.Error("expected error, got nil")
-		close(done) // Close down the runner as it will not have closed itself
+		close(done) // Close down the processor as it will not have closed itself
 	}
 }

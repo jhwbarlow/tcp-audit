@@ -8,30 +8,43 @@ import (
 )
 
 type cleaner interface {
-	cleanupEventer(eventer event.Eventer)
-	cleanupSinker(sinker sink.Sinker)
-	cleanupAll(eventer event.Eventer, sinker sink.Sinker)
+	registerEventer(eventer event.Eventer)
+	cleanupEventer()
+	registerSinker(sinker sink.Sinker)
+	cleanupSinker()
+	cleanupAll()
 }
 
-type closingCleaner struct{}
+type closingCleaner struct {
+	eventer event.Eventer
+	sinker  sink.Sinker
+}
 
-func (*closingCleaner) cleanupEventer(eventer event.Eventer) {
-	if eventerCloser, ok := eventer.(event.EventerCloser); ok {
+func (cc *closingCleaner) registerEventer(eventer event.Eventer) {
+	cc.eventer = eventer
+}
+
+func (cc *closingCleaner) registerSinker(sinker sink.Sinker) {
+	cc.sinker = sinker
+}
+
+func (cc *closingCleaner) cleanupEventer() {
+	if eventerCloser, ok := cc.eventer.(event.EventerCloser); ok {
 		if closeErr := eventerCloser.Close(); closeErr != nil {
 			log.Printf("Error: closing eventer: %v", closeErr)
 		}
 	}
 }
 
-func (*closingCleaner) cleanupSinker(sinker sink.Sinker) {
-	if sinkerCloser, ok := sinker.(sink.SinkerCloser); ok {
+func (cc *closingCleaner) cleanupSinker() {
+	if sinkerCloser, ok := cc.sinker.(sink.SinkerCloser); ok {
 		if closeErr := sinkerCloser.Close(); closeErr != nil {
 			log.Printf("Error: closing sinker: %v", closeErr)
 		}
 	}
 }
 
-func (cc *closingCleaner) cleanupAll(eventer event.Eventer, sinker sink.Sinker) {
-	cc.cleanupEventer(eventer)
-	cc.cleanupSinker(sinker)
+func (cc *closingCleaner) cleanupAll() {
+	cc.cleanupEventer()
+	cc.cleanupSinker()
 }

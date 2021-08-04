@@ -3,9 +3,9 @@ package main
 import (
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
-	"syscall"
 
 	"github.com/jhwbarlow/tcp-audit/pkg/event"
 	"github.com/jhwbarlow/tcp-audit/pkg/pluginload"
@@ -27,47 +27,26 @@ var (
 )
 
 func main() {
+	exiter := new(unixExiter)
+
 	flag.Parse()
 	if err := checkFlags(); err != nil {
-		log.Fatalf("Error: command-line flags: %v", err)
+		log.Printf("Error: command-line flags: %v", err)
+		exiter.exitOnError()
 	}
 
-	runner := newEventPipingRunner()
-	signalHandler := signalhandler.NewUnixSignalHandler()
-
-	run(*eventerFlag, *sinkerFlag, signalHandler, runner)
-}
-
-func run(eventerPath string,
-	sinkerPath string,
-	signalHandler signalhandler.SignalHandler,
-	runner eventPipingRunner) {
-	signalChan, done := signalHandler.Install(os.Interrupt, unix.SIGTERM)
 	cleaner := new(closingCleaner)
-
-	eventer, err := loadEventer(eventerPath)
+	eventerPluginLoader := pluginload.NewFilesystemSharedObjectPluginLoader(*eventerFlag)
+	sinkerPluginLoader := pluginload.NewFilesystemSharedObjectPluginLoader(*sinkerFlag)
+	eventer, sinker, err := initPlugins(eventerPluginLoader, sinkerPluginLoader, cleaner)
 	if err != nil {
-		log.Fatalf("Error: initialising eventer: %v", err)
+		log.Printf("Error: initialising plugins: %v", err)
+		exiter.exitOnError()
 	}
+	signalHandler := signalhandler.NewUnixSignalHandler()
+	processor := newPipingEventProcessor(eventer, sinker, maxErrors)
 
-	sinker, err := loadSinker(sinkerPath)
-	if err != nil {
-		log.Printf("Error: initialising sinker: %v", err)
-		cleaner.cleanupEventer(eventer)
-		os.Exit(1)
-	}
-
-	if err := newEventPipingRunner(eventer, sinker, done, maxErrors).run(); err != nil {
-		log.Printf("Error: runner: %v", err)
-		cleaner.cleanupAll(eventer, sinker)
-		os.Exit(1)
-	}
-
-	// If we get here, the runner must've stopped due to being asked. This can only happen
-	// from a signal, so retrieve it
-	cleaner.cleanupAll(eventer, sinker)
-	signal := <-signalChan
-	handleSignal(signal)
+	run(processor, signalHandler, cleaner, exiter)
 }
 
 func checkFlags() error {
@@ -82,23 +61,74 @@ func checkFlags() error {
 	return nil
 }
 
-func loadSinker(path string) (sink.Sinker, error) {
-	pluginLoader := pluginload.NewFilesystemSharedObjectPluginLoader(path)
-	loader := sink.NewPluginSinkerLoader(pluginLoader)
-	return loader.Load()
+func initPlugins(eventerPluginLoader pluginload.PluginLoader,
+	sinkerPluginLoader pluginload.PluginLoader,
+	cleaner cleaner) (event.Eventer, sink.Sinker, error) {
+	eventer, err := initEventerPlugin(eventerPluginLoader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("initialising eventer: %w", err)
+	}
+	cleaner.registerEventer(eventer)
+
+	sinker, err := initSinkerPlugin(sinkerPluginLoader)
+	if err != nil {
+		cleaner.cleanupEventer()
+		return nil, nil, fmt.Errorf("initialising sinker: %w", err)
+	}
+	cleaner.registerSinker(sinker)
+
+	return eventer, sinker, nil
 }
 
-func loadEventer(path string) (event.Eventer, error) {
-	pluginLoader := pluginload.NewFilesystemSharedObjectPluginLoader(path)
-	loader := event.NewPluginEventerLoader(pluginLoader)
-	return loader.Load()
-}
-
-func handleSignal(signal os.Signal) {
-	exitCode := 0
-	if signal, ok := signal.(syscall.Signal); ok {
-		exitCode = 127 + int(signal)
+func initEventerPlugin(eventerPluginLoader pluginload.PluginLoader) (event.Eventer, error) {
+	eventerLoader := getEventerLoader(eventerPluginLoader)
+	eventer, err := loadEventer(eventerLoader)
+	if err != nil {
+		return nil, fmt.Errorf("loading eventer: %w", err)
 	}
 
-	os.Exit(exitCode)
+	return eventer, nil
+}
+
+func initSinkerPlugin(sinkerPluginLoader pluginload.PluginLoader) (sink.Sinker, error) {
+	sinkerLoader := getSinkerLoader(sinkerPluginLoader)
+	sinker, err := loadSinker(sinkerLoader)
+	if err != nil {
+		return nil, fmt.Errorf("loading sinker: %w", err)
+	}
+
+	return sinker, nil
+}
+
+func getSinkerLoader(pluginLoader pluginload.PluginLoader) sink.SinkerLoader {
+	return sink.NewPluginSinkerLoader(pluginLoader)
+}
+
+func getEventerLoader(pluginLoader pluginload.PluginLoader) event.EventerLoader {
+	return event.NewPluginEventerLoader(pluginLoader)
+}
+
+func loadEventer(eventerLoader event.EventerLoader) (event.Eventer, error) {
+	return eventerLoader.Load()
+}
+
+func loadSinker(sinkerLoader sink.SinkerLoader) (sink.Sinker, error) {
+	return sinkerLoader.Load()
+}
+
+func run(processor eventProcessor, signalHandler signalhandler.SignalHandler, cleaner cleaner, exiter exiter) {
+	signalChan, done := signalHandler.Install(os.Interrupt, unix.SIGTERM)
+
+	processor.registerDoneChannel(done)
+	if err := processor.run(); err != nil {
+		log.Printf("Error: event processor: %v", err)
+		cleaner.cleanupAll()
+		exiter.exitOnError()
+	}
+
+	// If we get here, the processor must've stopped due to being asked. This can only happen
+	// from a signal, so retrieve it
+	cleaner.cleanupAll()
+	signal := <-signalChan
+	exiter.exitOnSignal(signal)
 }

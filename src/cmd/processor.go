@@ -8,31 +8,32 @@ import (
 	"github.com/jhwbarlow/tcp-audit/pkg/sink"
 )
 
-type runner interface {
+type eventProcessor interface {
 	run() error
+	registerDoneChannel(<-chan struct{})
 }
 
-type eventPipingRunner struct {
+type pipingEventProcessor struct {
 	eventer   event.Eventer
 	sinker    sink.Sinker
-	done      <-chan struct{}
 	maxErrors int
+	done      <-chan struct{}
 }
 
-func newEventPipingRunner(eventer event.Eventer,
-	sinker sink.Sinker,
-	done <-chan struct{},
-	maxErrors int) *eventPipingRunner {
-	return &eventPipingRunner{
+func newPipingEventProcessor(eventer event.Eventer, sinker sink.Sinker, maxErrors int) *pipingEventProcessor {
+	return &pipingEventProcessor{
 		eventer:   eventer,
 		sinker:    sinker,
-		done:      done,
 		maxErrors: maxErrors,
 	}
 }
 
-func (r *eventPipingRunner) run() error {
-	eventChan, errChan := r.startGetEvents()
+func (ep *pipingEventProcessor) registerDoneChannel(done <-chan struct{}) {
+	ep.done = done
+}
+
+func (ep *pipingEventProcessor) run() error {
+	eventChan, errChan := ep.startGetEvents()
 
 	// Main loop
 	var lastErr error
@@ -41,7 +42,7 @@ func (r *eventPipingRunner) run() error {
 loop:
 	for {
 		select {
-		case <-r.done:
+		case <-ep.done:
 			// Ensure handling a done signal takes priority when both a signal is pending
 			// and an event is available, hence the nested selects
 			// NOTE: It is non-deterministic which select will process the done signal. This
@@ -50,7 +51,7 @@ loop:
 			break loop
 		default:
 			select {
-			case <-r.done:
+			case <-ep.done:
 				// We have to select on the done channel again, to ensure this select
 				// does not block on waiting for an event (or event error) thus stopping
 				// the timely handling of a pending signal.
@@ -59,7 +60,7 @@ loop:
 				break loop
 			case event := <-eventChan:
 				fmt.Printf("==> TCP state event: %v\n", event)
-				if err := r.sinker.Sink(event); err != nil {
+				if err := ep.sinker.Sink(event); err != nil {
 					log.Printf("Error: sinking event: %v", err)
 					errCount++
 					wasErr = true
@@ -76,7 +77,7 @@ loop:
 		}
 
 		if wasErr {
-			if errCount == r.maxErrors {
+			if errCount == ep.maxErrors {
 				log.Println("too many contiguous event errors")
 				return fmt.Errorf("too many contiguous event errors: last error: %w", lastErr)
 			}
@@ -92,13 +93,13 @@ loop:
 	return nil
 }
 
-func (r *eventPipingRunner) startGetEvents() (<-chan *event.Event, <-chan error) {
+func (ep *pipingEventProcessor) startGetEvents() (<-chan *event.Event, <-chan error) {
 	eventChan := make(chan *event.Event)
 	errChan := make(chan error)
 
 	go func(chan<- *event.Event, chan<- error) {
 		for {
-			event, err := r.eventer.Event()
+			event, err := ep.eventer.Event()
 			if err != nil {
 				errChan <- err
 				continue
