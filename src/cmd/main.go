@@ -43,7 +43,7 @@ func main() {
 		log.Printf("Error: initialising plugins: %v", err)
 		exiter.exitOnError()
 	}
-	signalHandler := signalhandler.NewUnixSignalHandler()
+	signalHandler := signalhandler.NewOSSignalHandler()
 	processor := newPipingEventProcessor(eventer, sinker, maxErrors)
 
 	run(processor, signalHandler, cleaner, exiter)
@@ -124,6 +124,7 @@ func run(processor eventProcessor, signalHandler signalhandler.SignalHandler, cl
 		log.Printf("Error: event processor: %v", err)
 		cleaner.cleanupAll()
 		exiter.exitOnError()
+		return // In real life, will not get here, but needed for testing with a mock exiter
 	}
 
 	// If we get here, the processor must've stopped due to being asked. This can only happen

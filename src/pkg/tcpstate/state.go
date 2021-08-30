@@ -4,8 +4,10 @@ import (
 	"fmt"
 )
 
+// State represents the state of a TCP connection
 type State string
 
+// TCP states per RFC 793
 const (
 	StateListen      State = "LISTEN"
 	StateSynSent     State = "SYN-SENT"

@@ -8,7 +8,7 @@ import (
 )
 
 func TestUnixSignalHandler(t *testing.T) {
-	handler := NewUnixSignalHandler()
+	handler := NewOSSignalHandler()
 	signalChan, done := handler.Install(unix.SIGUSR2)
 
 	process, _ := os.FindProcess(os.Getpid())

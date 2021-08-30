@@ -15,6 +15,8 @@ type cleaner interface {
 	cleanupAll()
 }
 
+// ClosingCleaner cleans-up the registered eventer and/or sinker by calling their
+// close methods, if applicable.
 type closingCleaner struct {
 	eventer event.Eventer
 	sinker  sink.Sinker

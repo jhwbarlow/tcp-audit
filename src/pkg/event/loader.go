@@ -7,10 +7,12 @@ import (
 	"github.com/jhwbarlow/tcp-audit/pkg/pluginload"
 )
 
+// EventerLoader is an interface describing objects which create/"load" an Eventer.
 type EventerLoader interface {
 	Load() (Eventer, error)
 }
 
+// PluginEventerLoader loads a Eventer from a plugin.
 type PluginEventerLoader struct {
 	loader pluginload.PluginLoader
 }

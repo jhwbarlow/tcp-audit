@@ -5,28 +5,34 @@ import (
 	"os/signal"
 )
 
+// SignalHandler is an interface which describes objects which emit a signal and
+// simultaneously closes the done channel.
 type SignalHandler interface {
-	Install(signals ...os.Signal) (<-chan os.Signal, <-chan struct{})
+	Install(signals ...os.Signal) (signalChan <-chan os.Signal, done <-chan struct{})
 }
 
-type UnixSignalHandler struct{}
+// OSSignalHandler handles signals that originate from the operating system.
+type OSSignalHandler struct{}
 
-func NewUnixSignalHandler() *UnixSignalHandler {
-	return new(UnixSignalHandler)
+func NewOSSignalHandler() *OSSignalHandler {
+	return new(OSSignalHandler)
 }
 
-func (*UnixSignalHandler) Install(signals ...os.Signal) (<-chan os.Signal, <-chan struct{}) {
+// Install installs this handler for the given signals.
+// When a signal arrives, it is sent on the returned channel and the returned done channel
+// is also closed.
+func (*OSSignalHandler) Install(signals ...os.Signal) (signalChan <-chan os.Signal, done <-chan struct{}) {
 	signalChanIn := make(chan os.Signal, 1)
 	signal.Notify(signalChanIn, signals...)
 	signalChanOut := make(chan os.Signal, 1)
-	done := make(chan struct{})
+	doneOut := make(chan struct{})
 
 	go func(done chan<- struct{},
 		signalChanIn <-chan os.Signal,
 		signalChanOut chan<- os.Signal) {
 		signalChanOut <- <-signalChanIn
 		close(done)
-	}(done, signalChanIn, signalChanOut)
+	}(doneOut, signalChanIn, signalChanOut)
 
-	return signalChanOut, done
+	return signalChanOut, doneOut
 }

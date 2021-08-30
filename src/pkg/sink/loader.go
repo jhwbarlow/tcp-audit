@@ -7,10 +7,12 @@ import (
 	"github.com/jhwbarlow/tcp-audit/pkg/pluginload"
 )
 
+// SinkerLoader is an interface describing objects which create/"load" a Sinker.
 type SinkerLoader interface {
 	Load() (Sinker, error)
 }
 
+// PluginSinkerLoader loads a Sinker from a plugin.
 type PluginSinkerLoader struct {
 	loader pluginload.PluginLoader
 }

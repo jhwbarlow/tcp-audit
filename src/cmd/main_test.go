@@ -2,8 +2,10 @@ package main
 
 import (
 	"errors"
+	"log"
 	"os"
 	"plugin"
+	"sync"
 	"testing"
 
 	"github.com/jhwbarlow/tcp-audit/pkg/event"
@@ -12,17 +14,14 @@ import (
 )
 
 type mockProcessor struct {
-	registerDoneChannelCalled chan bool
+	registerDoneChannelCalled bool
 	done                      <-chan struct{}
 	errToReturn               error
 }
 
 func newMockProcessor(errToReturn error) *mockProcessor {
-	registerDoneChannelCalled := make(chan bool)
-
 	return &mockProcessor{
-		registerDoneChannelCalled: registerDoneChannelCalled,
-		errToReturn:               errToReturn,
+		errToReturn: errToReturn,
 	}
 }
 
@@ -36,24 +35,23 @@ func (mp *mockProcessor) run() error {
 }
 
 func (mp *mockProcessor) registerDoneChannel(done <-chan struct{}) {
-	mp.registerDoneChannelCalled <- true
+	mp.registerDoneChannelCalled = true
 	mp.done = done
 }
 
 type mockSignalHandler struct {
-	installCalled chan bool
+	installCalled bool
 	signalChanIn  <-chan os.Signal
 }
 
 func newMockSignalHandler(signalChanIn <-chan os.Signal) *mockSignalHandler {
-	installCalled := make(chan bool)
 	return &mockSignalHandler{
-		signalChanIn:  signalChanIn,
-		installCalled: installCalled}
+		signalChanIn: signalChanIn,
+	}
 }
 
 func (msh *mockSignalHandler) Install(signals ...os.Signal) (<-chan os.Signal, <-chan struct{}) {
-	msh.installCalled <- true
+	msh.installCalled = true
 
 	signalChanOut := make(chan os.Signal, 1)
 	done := make(chan struct{})
@@ -68,49 +66,44 @@ func (msh *mockSignalHandler) Install(signals ...os.Signal) (<-chan os.Signal, <
 	return signalChanOut, done
 }
 
-func newMockCleaner() *mockCleaner {
-	cleanupAllCalled := make(chan bool)
-	return &mockCleaner{cleanupAllCalled}
-}
-
 type mockCleaner struct {
-	cleanupAllCalled chan bool
+	cleanupAllCalled      bool
+	cleanupEventerCalled  bool
+	registerEventerCalled bool
+	registerSinkerCalled  bool
 }
 
 func (mc *mockCleaner) cleanupAll() {
-	mc.cleanupAllCalled <- true
+	mc.cleanupAllCalled = true
 }
 
-func (*mockCleaner) registerEventer(eventer event.Eventer) {}
+func (mc *mockCleaner) registerEventer(eventer event.Eventer) {
+	mc.registerEventerCalled = true
+}
 
-func (*mockCleaner) cleanupEventer() {}
+func (mc *mockCleaner) cleanupEventer() {
+	mc.cleanupEventerCalled = true
+}
 
-func (*mockCleaner) registerSinker(sinker sink.Sinker) {}
+func (mc *mockCleaner) registerSinker(sinker sink.Sinker) {
+	mc.registerSinkerCalled = true
+}
 
 func (*mockCleaner) cleanupSinker() {}
 
 type mockExiter struct {
-	exitOnErrorCalled  chan bool
-	exitOnSignalCalled chan bool
+	exitOnErrorCalled  bool
+	exitOnSignalCalled bool
 	signal             os.Signal
 }
 
-func newMockExiter() *mockExiter {
-	exitOnErrorCalled := make(chan bool)
-	exitOnSignalCalled := make(chan bool)
-
-	return &mockExiter{
-		exitOnErrorCalled:  exitOnErrorCalled,
-		exitOnSignalCalled: exitOnSignalCalled,
-	}
-}
-
 func (me *mockExiter) exitOnError() {
-	me.exitOnErrorCalled <- true
+	log.Printf("exiting...")
+	me.exitOnErrorCalled = true
 }
 
 func (me *mockExiter) exitOnSignal(signal os.Signal) {
-	me.exitOnSignalCalled <- true
+	me.exitOnSignalCalled = true
 	me.signal = signal
 }
 
@@ -144,44 +137,66 @@ func (msl *mockSinkerLoader) Load() (sink.Sinker, error) {
 	return nil, nil
 }
 
-type mockPluginLoader struct{}
+type mockPluginLoader struct {
+	errorToReturn  error
+	symbolToReturn plugin.Symbol
+}
+
+func newMockPluginLoader(symbolToReturn plugin.Symbol, errorToReturn error) *mockPluginLoader {
+	return &mockPluginLoader{
+		symbolToReturn: symbolToReturn,
+		errorToReturn:  errorToReturn,
+	}
+}
 
 func (mpl *mockPluginLoader) Load() (plugin.Symbol, error) {
-	return nil, nil
+	if mpl.errorToReturn != nil {
+		return nil, mpl.errorToReturn
+	}
+
+	return mpl.symbolToReturn, nil
 }
 
 func TestRun(t *testing.T) {
 	mockProcessor := newMockProcessor(nil)
 	signalChan := make(chan os.Signal, 1)
 	mockSignalHandler := newMockSignalHandler(signalChan)
-	mockCleaner := newMockCleaner()
-	mockExiter := newMockExiter()
+	mockCleaner := new(mockCleaner)
+	mockExiter := new(mockExiter)
 
 	// Run the processor until a signal is sent (the processor interface
 	// implies it runs in an infinite loop until stopped)
-	go run(mockProcessor, mockSignalHandler, mockCleaner, mockExiter)
+	waitGroup := new(sync.WaitGroup)
+	waitGroup.Add(1)
+	go func() {
+		run(mockProcessor, mockSignalHandler, mockCleaner, mockExiter)
+		waitGroup.Done()
+	}()
 
 	// Cause the mock signal handler to close the done channel, stopping
 	// the processor being run in run()
 	signalChan <- unix.SIGUSR2
 
+	// Wait for the run function to return so we check it did the correct things
+	waitGroup.Wait()
+
 	// Test that run() installed the signal handler
-	if !<-mockSignalHandler.installCalled {
+	if !mockSignalHandler.installCalled {
 		t.Error("expected SignalHandler to be installed, but was not")
 	}
 
 	// Test that run() registered the done channel with the processor
-	if !<-mockProcessor.registerDoneChannelCalled {
+	if !mockProcessor.registerDoneChannelCalled {
 		t.Error("expected done channel to be registered, but was not")
 	}
 
 	// Test that run() ran the cleaner
-	if !<-mockCleaner.cleanupAllCalled {
+	if !mockCleaner.cleanupAllCalled {
 		t.Error("expected cleanupAll() to be called, but was not")
 	}
 
 	// Test that run() ran the exiter
-	if !<-mockExiter.exitOnSignalCalled {
+	if !mockExiter.exitOnSignalCalled {
 		t.Error("expected exitOnSignal() to be called, but was not")
 	}
 }
@@ -191,30 +206,38 @@ func TestRunProcessorError(t *testing.T) {
 	mockProcessor := newMockProcessor(mockProcessorError)
 	signalChan := make(chan os.Signal, 1)
 	mockSignalHandler := newMockSignalHandler(signalChan)
-	mockCleaner := newMockCleaner()
-	mockExiter := newMockExiter()
+	mockCleaner := new(mockCleaner)
+	mockExiter := new(mockExiter)
 
 	// Run the processor until a signal is sent (the processor interface
 	// implies it runs in an infinite loop until stopped)
-	go run(mockProcessor, mockSignalHandler, mockCleaner, mockExiter)
+	waitGroup := new(sync.WaitGroup)
+	waitGroup.Add(1)
+	go func() {
+		run(mockProcessor, mockSignalHandler, mockCleaner, mockExiter)
+		waitGroup.Done()
+	}()
+
+	// Wait for the run function to return so we check it did the correct things
+	waitGroup.Wait()
 
 	// Test that run() installed the signal handler
-	if !<-mockSignalHandler.installCalled {
+	if !mockSignalHandler.installCalled {
 		t.Error("expected SignalHandler to be installed, but was not")
 	}
 
 	// Test that run() registered the done channel with the processor
-	if !<-mockProcessor.registerDoneChannelCalled {
+	if !mockProcessor.registerDoneChannelCalled {
 		t.Error("expected done channel to be registered, but was not")
 	}
 
 	// Test that run() ran the cleaner
-	if !<-mockCleaner.cleanupAllCalled {
+	if !mockCleaner.cleanupAllCalled {
 		t.Error("expected cleanupAll() to be called, but was not")
 	}
 
 	// Test that run() ran the exiter
-	if !<-mockExiter.exitOnErrorCalled {
+	if !mockExiter.exitOnErrorCalled {
 		t.Error("expected exitOnSignal() to be called, but was not")
 	}
 }
@@ -335,17 +358,67 @@ func TestNilSinkerFlagError(t *testing.T) {
 	t.Logf("got error %q (of type %T)", err, err)
 }
 
-func TestEventerRegisteredWithCleaner(t *testing.T) {
-	mockPluginLoaderForEventer := new(mockPluginLoader)
-	mockPluginLoaderForSinker := new(mockSinkerLoader)
-	mockCleaner := newMockCleaner()
-	initPlugins()
+func TestEventerAndSinkerRegisteredWithCleaner(t *testing.T) {
+	mockEventerConstructorSymbol := func() (event.Eventer, error) {
+		return nil, nil
+	}
+
+	mockSinkerConstructorSymbol := func() (sink.Sinker, error) {
+		return nil, nil
+	}
+
+	mockPluginLoaderForEventer := newMockPluginLoader(mockEventerConstructorSymbol, nil)
+	mockPluginLoaderForSinker := newMockPluginLoader(mockSinkerConstructorSymbol, nil)
+	mockCleaner := new(mockCleaner)
+	_, _, err := initPlugins(mockPluginLoaderForEventer, mockPluginLoaderForSinker, mockCleaner)
+	if err != nil {
+		t.Errorf("expected nil error, got %q (of type %T)", err, err)
+	}
+
+	if !mockCleaner.registerEventerCalled {
+		t.Error("expected Eventer to be registered with cleaner, but was not")
+	}
+
+	if !mockCleaner.registerSinkerCalled {
+		t.Error("expected Sinker to be registered with cleaner, but was not")
+	}
 }
 
-func TestSinkerRegisteredWithCleaner(t *testing.T) {
+func TestInitPluginErrorOnEventerInitFailure(t *testing.T) {
+	mockEventerConstructorSymbol := func() {} // Deliberately wrong function signature
+	mockSinkerConstructorSymbol := func() (sink.Sinker, error) {
+		return nil, nil
+	}
 
+	mockPluginLoaderForEventer := newMockPluginLoader(mockEventerConstructorSymbol, nil)
+	mockPluginLoaderForSinker := newMockPluginLoader(mockSinkerConstructorSymbol, nil)
+	mockCleaner := new(mockCleaner)
+	_, _, err := initPlugins(mockPluginLoaderForEventer, mockPluginLoaderForSinker, mockCleaner)
+	if err == nil {
+		t.Error("expected error, got nil")
+	}
+
+	t.Logf("got error %q (of type %T)", err, err)
 }
 
 func TestEventerCleanedUpOnSinkerInitFailure(t *testing.T) {
+	mockEventerConstructorSymbol := func() (event.Eventer, error) {
+		return nil, nil
+	}
 
+	mockSinkerConstructorSymbol := func() {} // Deliberately wrong function signature
+
+	mockPluginLoaderForEventer := newMockPluginLoader(mockEventerConstructorSymbol, nil)
+	mockPluginLoaderForSinker := newMockPluginLoader(mockSinkerConstructorSymbol, nil)
+	mockCleaner := new(mockCleaner)
+	_, _, err := initPlugins(mockPluginLoaderForEventer, mockPluginLoaderForSinker, mockCleaner)
+	if err == nil {
+		t.Error("expected error, got nil")
+	}
+
+	t.Logf("got error %q (of type %T)", err, err)
+
+	if !mockCleaner.cleanupEventerCalled {
+		t.Error("expected Eventer cleaned up, but was not")
+	}
 }
