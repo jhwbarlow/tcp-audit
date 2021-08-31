@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/jhwbarlow/tcp-audit/pkg/event"
+	"github.com/jhwbarlow/tcp-audit-common/pkg/event"
 )
 
 type mockEventerCloser struct {

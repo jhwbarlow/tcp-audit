@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jhwbarlow/tcp-audit/pkg/event"
-	"github.com/jhwbarlow/tcp-audit/pkg/tcpstate"
+	"github.com/jhwbarlow/tcp-audit-common/pkg/event"
+	"github.com/jhwbarlow/tcp-audit-common/pkg/tcpstate"
 )
 
 type mockEventer struct {

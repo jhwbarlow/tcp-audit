@@ -7,10 +7,10 @@ import (
 	"log"
 	"os"
 
-	"github.com/jhwbarlow/tcp-audit/pkg/event"
-	"github.com/jhwbarlow/tcp-audit/pkg/pluginload"
+	"github.com/jhwbarlow/tcp-audit-common/pkg/event"
+	"github.com/jhwbarlow/tcp-audit-common/pkg/pluginload"
 	"github.com/jhwbarlow/tcp-audit/pkg/signalhandler"
-	"github.com/jhwbarlow/tcp-audit/pkg/sink"
+	"github.com/jhwbarlow/tcp-audit-common/pkg/sink"
 	"golang.org/x/sys/unix"
 )
 

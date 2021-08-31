@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/jhwbarlow/tcp-audit/pkg/event"
-	"github.com/jhwbarlow/tcp-audit/pkg/sink"
+	"github.com/jhwbarlow/tcp-audit-common/pkg/event"
+	"github.com/jhwbarlow/tcp-audit-common/pkg/sink"
 )
 
 type eventProcessor interface {
